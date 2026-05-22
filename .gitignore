@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+A_solution/outputs/report/latex_build/
+A_solution/outputs/report/$build/
