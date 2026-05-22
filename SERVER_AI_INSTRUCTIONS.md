@@ -22,6 +22,7 @@ cd "$WORKDIR"
 
 git clone https://github.com/Seven-creater/cup.git
 cd cup
+git rev-parse HEAD
 
 conda create -y -n cup-a python=3.11
 source "$(conda info --base)/etc/profile.d/conda.sh"
@@ -55,21 +56,25 @@ import pandas as pd
 import pypdf
 
 base = Path("A_solution/outputs")
+workbooks = sorted(base.glob("*.xlsx"))
+pdfs = sorted((base / "report").glob("*.pdf"))
 required = [
-    base / "A题_求解结果汇总.xlsx",
-    base / "report" / "A题_电氢氨园区优化运行报告.pdf",
     base / "report" / "main.tex",
     base / "tables" / "validation_checks.csv",
 ]
 for path in required:
     print(path, "exists=", path.exists(), "size=", path.stat().st_size if path.exists() else 0)
+print("workbooks=", [p.name for p in workbooks])
+print("pdfs=", [p.name for p in pdfs])
+assert workbooks, "No output workbook found"
+assert pdfs, "No output PDF found"
 
 checks = pd.read_csv(base / "tables" / "validation_checks.csv")
 print(checks.to_string(index=False))
 
-pdf = base / "report" / "A题_电氢氨园区优化运行报告.pdf"
+pdf = pdfs[0]
 reader = pypdf.PdfReader(str(pdf))
-print("report_pages=", len(reader.pages))
+print("checked_pdf=", pdf.name, "pages=", len(reader.pages))
 
 p1 = pd.read_csv(base / "tables" / "problem1_summary.csv")
 p2 = pd.read_csv(base / "tables" / "problem2_typical_summary.csv")
