@@ -4,3 +4,4 @@ __pycache__/
 Thumbs.db
 A_solution/outputs/report/latex_build/
 A_solution/outputs/report/$build/
+cup_final_outputs_*.tar.gz
