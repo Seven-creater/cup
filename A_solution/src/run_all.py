@@ -961,6 +961,364 @@ margin_export = 0.20 - r3
     return md
 
 
+def create_expanded_paper(summary: Dict[str, object]) -> None:
+    """Write the contest-style paper artifacts after all result tables exist."""
+
+    def fnum(value: object, digits: int = 2) -> str:
+        try:
+            return f"{float(value):.{digits}f}"
+        except Exception:
+            return str(value)
+
+    def status_cn(value: object) -> str:
+        return {"full": "三项均满足", "partial": "部分满足", "none": "均不满足"}.get(str(value), str(value))
+
+    def pass_cn(value: float) -> str:
+        return "通过" if value > 0 else "不通过"
+
+    def latex_escape(value: object) -> str:
+        text = str(value)
+        replacements = {
+            "\\": r"\textbackslash{}",
+            "&": r"\&",
+            "%": r"\%",
+            "$": r"\$",
+            "#": r"\#",
+            "_": r"\_",
+            "{": r"\{",
+            "}": r"\}",
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        return text
+
+    p1 = summary["problem1"]
+    p2best = summary["problem2_best"]
+    p3best = summary["problem3_best"]
+    p4 = summary["problem4"]
+    p2 = pd.read_csv(TABLE_DIR / "problem2_typical_summary.csv")
+    p3 = pd.read_csv(TABLE_DIR / "problem3_year_summary.csv")
+    p4_no = pd.read_csv(TABLE_DIR / "problem4_no_storage.csv")
+    p4_st = pd.read_csv(TABLE_DIR / "problem4_storage.csv")
+    checks = pd.read_csv(TABLE_DIR / "validation_checks.csv")
+
+    scenario = str(p4["max_curtail_scenario"])
+    base_row = p4_no[p4_no["scenario"] == scenario].iloc[0]
+    stor_row = p4_st[p4_st["scenario"] == scenario].iloc[0]
+    no_annual_cost = float((p4_no["comprehensive_cost_yuan"] * DAYS_PER_SCENARIO).sum())
+    no_annual_product = float((p4_no["product_ton"] * DAYS_PER_SCENARIO).sum())
+    no_avg_cost = no_annual_cost / no_annual_product if no_annual_product > 0 else math.inf
+    product_gain = float(stor_row["product_ton"] - base_row["product_ton"])
+    product_gain_pct = product_gain / float(base_row["product_ton"]) * 100 if float(base_row["product_ton"]) > 0 else 0.0
+    solver_values = sorted(str(x) for x in p4_st["solver_status"].dropna().unique())
+    solver_note = (
+        "当前环境检测到 PuLP，问题四储能调度采用严格 MILP：包含设备运行二进制变量、充放电互斥、SOC 首尾一致、运行时 10% 下限和目标产量约束。"
+        if PULP_AVAILABLE
+        else "当前环境未检测到 PuLP，问题四采用可复现离散储能调度 fallback；服务器安装 PuLP 后会自动切换为严格 MILP。"
+    )
+
+    p2_md_rows = "\n".join(
+        f"| {int(row.target_ton)} | {fnum(row.product_ton)} | {fnum(row.comprehensive_cost_per_ton)} | {status_cn(row.status)} |"
+        for row in p2.itertuples()
+    )
+    p3_md_rows = "\n".join(
+        f"| {int(row.target_ton)} | {fnum(row.annual_product_ton)} | {fnum(row.annual_avg_cost_per_ton)} | {int(row.full_days)} | {int(row.partial_days)} | {int(row.none_days)} |"
+        for row in p3.itertuples()
+    )
+    checks_md_rows = "\n".join(
+        f"| {row.check} | {row.value} | {row.pass_ if hasattr(row, 'pass_') else getattr(row, '_3', '')} |"
+        for row in checks.itertuples()
+    )
+
+    formal_md = f"""# A题：统一口径下的绿电直连型电氢氨园区优化运行
+
+## 摘要
+
+本文面向绿电直连型电氢氨园区，围绕“风光出力、常规负荷、电解制氢、合成氨生产、电网购售电和离网储能”之间的小时级耦合关系，建立统一的数据读取、绿电指标和吨氨成本核算框架。模型严格按照题面给定公式计算新能源自发自用比例、总用电量绿电比例和新能源上网电量比例；问题一至四均采用题面阈值 `>60%`、`>30%`、`<20%` 判定，政策中 2030 年前提升至 35% 的要求仅用于问题五讨论。
+
+求解结果表明：典型满负荷日绿电比例较高，但新能源自发自用比例和上网比例存在明显短板；离散开停机可通过选择低成本或高风光小时降低吨氨成本，但无法从根本上消除源荷错配；连续功率调节进一步提高了负荷柔性，是联网模式下更稳定的运行方式；离网模式下储能的主要价值不在于“无限吸收弃电”，而是在保持常规负荷服务优先的前提下提高制氨产量。问题四当前储能配置为 `{fnum(p4['battery_e_mwh'], 1)} MWh / {fnum(p4['battery_p_mw'], 1)} MW`，代表年产氨量 `{fnum(p4['annual_product_ton'])} t`，年平均综合吨氨成本 `{fnum(p4['annual_avg_cost_per_ton'])} 元/t`。
+
+关键词：绿电直连；电氢氨耦合；合成氨；混合整数规划；储能配置；源荷匹配
+
+## 1 问题重述
+
+园区由 40 MW 风电、64 MW 光伏、常规电负荷、ALK 电解槽、PEM 电解槽和合成氨装置组成。初始制氨产能为 36 t/d，扩容后制氨产能为 72 t/d；题面提供 6 类风电场景和 4 类光伏场景，组合形成 24 个风光场景。每个场景代表 15 天，因此本文按 360 天代表年统计，不补足 365 天。
+
+五个问题分别对应：
+
+- 问题一：36 t/d 满负荷连续运行的确定性核算。
+- 问题二：72 t/d 产能下，72/63/54/45/36 t/d 五个产量水平的离散开停机调度。
+- 问题三：72 t/d 产能下，设备保持运行且在 10%-100% 额定功率之间连续调节。
+- 问题四：离网模式下先最大化无储能制氨量，再针对最大弃电场景配置储能并回算 24 个场景。
+- 问题五：结合政策要求讨论绿电直连园区对电力系统的利弊和建议。
+
+## 2 建模边界与统一口径
+
+本文最重要的建模原则是“统一口径优先”。所有问题共用同一个 `load_inputs()`、`calc_green_metrics()` 和 `calc_costs()`，避免同一指标在不同问题中发生含义漂移。
+
+主要边界如下：
+
+- 绿电指标完全按题面公式计算，不替换为工程经验公式。
+- 达标判定采用严格不等式，并报告三项安全裕度。
+- 年平均吨氨成本按年总成本除以年总产氨量计算。
+- 所有年化固定成本按 360 天代表年摊入。
+- 72 t/d 扩容只放大 ALK、PEM 和合成氨装置；常规负荷、风电和光伏装机不自动放大。
+- 问题二开机小时满负荷运行，停机小时功率为 0。
+- 问题三每个给定日产量分别求解，日产量作为等式约束。
+- 问题四离网允许停机；运行时功率不低于 10%，并优先服务常规负荷。
+- 风光余电上网收益按当小时风电、光伏出力占比分摊。
+
+## 3 指标与成本模型
+
+三项绿电直连指标为：
+
+```text
+r1 = (总用电量 - 上网电量 - 网购电量) / 新能源发电量
+r2 = (新能源发电量 - 上网电量) / 总用电量
+r3 = 上网电量 / 新能源发电量
+```
+
+安全裕度为：
+
+```text
+margin_self_use = r1 - 0.60
+margin_green    = r2 - 0.30
+margin_export   = 0.20 - r3
+```
+
+成本分为运行成本和综合吨氨成本。综合口径包含购电成本、售电收入抵扣、风光度电成本、制氢/制氨运维、合成氨装置年化成本和储能年化成本。问题二、三扩容到 72 t/d 后，即使选择较低日产量，也默认承担 72 t/d 产能对应的固定成本，避免低产量方案被低估。
+
+## 4 问题一：典型日确定性核算
+
+典型日新能源发电量为 `{fnum(p1['renewable_mwh'])} MWh`，总用电量为 `{fnum(p1['total_use_mwh'])} MWh`，购电量为 `{fnum(p1['buy_mwh'])} MWh`，上网电量为 `{fnum(p1['sell_mwh'])} MWh`。综合吨氨成本为 `{fnum(p1['comprehensive_cost_per_ton'])} 元/t`。
+
+| 指标 | 数值 | 安全裕度 | 判定 |
+|---|---:|---:|---|
+| 新能源自发自用比例 | {fnum(p1['self_use_ratio'], 3)} | {fnum(p1['margin_self_use'], 3)} | {pass_cn(float(p1['margin_self_use']))} |
+| 总用电量绿电比例 | {fnum(p1['green_ratio'], 3)} | {fnum(p1['margin_green'], 3)} | {pass_cn(float(p1['margin_green']))} |
+| 新能源上网比例 | {fnum(p1['export_ratio'], 3)} | {fnum(p1['margin_export'], 3)} | {pass_cn(float(p1['margin_export']))} |
+
+问题一状态为 `{status_cn(p1['status'])}`。该结果说明，满负荷连续运行能够形成较高的绿电用电比例，但由于午间光伏富余较强，上网比例偏高并压低了自发自用比例。
+
+## 5 问题二：离散开停机调度
+
+72 t/d 产能下，合成氨额定产量为 3 t/h，因此 72/63/54/45/36 t/d 分别对应 24/21/18/15/12 个开机小时。模型在不引入启停成本、爬坡和最小连续开机时间的前提下，选择边际综合成本较低的开机小时。
+
+| 日产量 t/d | 实际产量 t | 综合成本 元/t | 达标分类 |
+|---:|---:|---:|---|
+{p2_md_rows}
+
+典型日最低综合吨氨成本对应日产量 `{int(p2best['target_ton'])} t/d`，综合成本 `{fnum(p2best['comprehensive_cost_per_ton'])} 元/t`。离散开停机能降低运行成本，但若停机时段恰好错过新能源消纳窗口，仍可能恶化自发自用比例或上网比例。
+
+## 6 问题三：连续功率调节
+
+连续调节模型中，ALK、PEM 和合成氨装置按额定功率比例同步调节。设备保持运行，功率处于 10%-100% 额定范围内；每个给定日产量分别求解，日产氨量不由模型自由选择。代表年结果如下：
+
+| 日产量 t/d | 年产量 t | 年平均综合成本 元/t | 全满足天数 | 部分满足天数 | 不满足天数 |
+|---:|---:|---:|---:|---:|---:|
+{p3_md_rows}
+
+代表年最低年平均综合吨氨成本对应日产量 `{int(p3best['target_ton'])} t/d`，成本 `{fnum(p3best['annual_avg_cost_per_ton'])} 元/t`。这说明在联网条件下，连续调节的价值主要来自把柔性制氨负荷移动到低电价或高风光出力小时。
+
+## 7 问题四：离网储能配置
+
+离网模式下无购电、无上网。无储能阶段采用分层目标：先最大化制氨量，再在同等产量下比较综合成本。最大弃电场景来自无储能离网结果，而不是联网模式的上网电量；当前识别为 `{scenario}`。
+
+最大弃电场景对比如下：
+
+| 项目 | 无储能 | 有储能 |
+|---|---:|---:|
+| 日产氨量 t | {fnum(base_row['product_ton'])} | {fnum(stor_row['product_ton'])} |
+| 弃电量 MWh | {fnum(base_row['curtail_mwh'])} | {fnum(stor_row['curtail_mwh'])} |
+| 常规负荷缺供 MWh | {fnum(base_row['base_unserved_mwh'], 6)} | {fnum(stor_row['base_unserved_mwh'], 6)} |
+| 综合吨氨成本 元/t | {fnum(base_row['comprehensive_cost_per_ton'])} | {fnum(stor_row['comprehensive_cost_per_ton'])} |
+
+储能使该场景日产氨量提升 `{fnum(product_gain)} t`，约 `{fnum(product_gain_pct, 1)}%`。回算 24 个场景后，无储能代表年产量为 `{fnum(no_annual_product)} t`，年平均综合吨氨成本为 `{fnum(no_avg_cost)} 元/t`；配置储能后代表年产量为 `{fnum(p4['annual_product_ton'])} t`，年平均综合吨氨成本为 `{fnum(p4['annual_avg_cost_per_ton'])} 元/t`。
+
+求解器状态：`{', '.join(solver_values)}`。{solver_note}
+
+## 8 问题五：政策影响与建议
+
+绿电直连型电氢氨园区对电力系统具有双重影响。积极方面，它能够促进新能源就近消纳，把波动性风光电转化为氨等可储运化工产品，并提升工业园区低碳竞争力。风险方面，高比例直连可能增加局部潮流波动、备用需求和计量结算复杂度；如果只追求装机规模而不重视负荷柔性，会导致弃电和上网比例上升。
+
+建议如下：
+
+- 坚持以荷定源，以题面三项指标而非单一装机规模评价项目合理性。
+- 将电解槽、合成氨和储能作为协同调节资源，而不是孤立设备。
+- 对多用户园区明确物理边界、计量边界和责任边界。
+- 建立绿色氢氨产品认证和溯源体系，使绿电价值进入产品价格。
+- 对能够降低系统调峰压力的园区，探索辅助服务补偿机制。
+- 2030 年前 35% 绿电比例可作为未来趋严情景纳入扩展分析，但不应替代问题一至四题面阈值。
+
+## 9 验证与可复现性
+
+本项目所有结果均由 `python -X utf8 A_solution/src/run_all.py` 生成。验证项如下：
+
+| 检查项 | 数值 | 是否通过 |
+|---|---|---|
+{checks_md_rows}
+
+主要输出文件包括：
+
+- `outputs/A题_求解结果汇总.xlsx`
+- `outputs/tables/problem1_hourly.csv`
+- `outputs/tables/problem2_scenarios.csv`
+- `outputs/tables/problem3_scenarios.csv`
+- `outputs/tables/problem4_no_storage.csv`
+- `outputs/tables/problem4_storage.csv`
+- `outputs/report/main.tex`
+- `outputs/report/formal_paper.md`
+
+## 10 结论
+
+本文给出了一套口径统一、可复现的 A 题基准解。问题一揭示了满负荷运行下的自发自用和上网比例压力；问题二说明离散开停机可以降低成本但调节粒度较粗；问题三表明连续功率调节更适合利用风光富余和分时电价；问题四说明储能应以经济性和目标产量约束共同决定，而不能简单按最大弃电量配置。整体来看，绿电直连项目的关键不在于堆叠复杂算法，而在于保持指标、成本、产量和约束口径的一致。
+"""
+
+    p2_tex_rows = "\n".join(
+        f"{int(row.target_ton)} & {fnum(row.product_ton)} & {fnum(row.comprehensive_cost_per_ton)} & {latex_escape(status_cn(row.status))} \\\\"
+        for row in p2.itertuples()
+    )
+    p3_tex_rows = "\n".join(
+        f"{int(row.target_ton)} & {fnum(row.annual_product_ton)} & {fnum(row.annual_avg_cost_per_ton)} & {int(row.full_days)} & {int(row.partial_days)} & {int(row.none_days)} \\\\"
+        for row in p3.itertuples()
+    )
+    checks_tex_rows = "\n".join(
+        f"{latex_escape(row.check)} & {latex_escape(row.value)} & {latex_escape(row.pass_ if hasattr(row, 'pass_') else getattr(row, '_3', ''))} \\\\"
+        for row in checks.itertuples()
+    )
+
+    latex = rf"""
+\documentclass[12pt]{{article}}
+\usepackage[UTF8]{{ctex}}
+\usepackage{{geometry,booktabs,longtable,graphicx,amsmath,array}}
+\geometry{{a4paper,margin=2.2cm}}
+\graphicspath{{{{../figures/}}}}
+\title{{A题：统一口径下的绿电直连型电氢氨园区优化运行}}
+\author{{Codex 自动建模求解}}
+\date{{2026年5月}}
+\begin{{document}}
+\maketitle
+
+\begin{{abstract}}
+本文面向绿电直连型电氢氨园区，建立统一的数据读取、绿电指标和吨氨成本核算框架。问题一至四严格采用题面阈值 $r_1>60\%$、$r_2>30\%$、$r_3<20\%$ 判定，政策中 2030 年前提高至 35\% 的要求仅用于问题五讨论。结果表明，满负荷运行存在上网比例偏高和自发自用不足，离散开停机可降低成本但粒度较粗，连续功率调节更利于源荷匹配；离网储能在保持常规负荷优先服务的前提下，可提高风光富余利用和制氨产量。
+\end{{abstract}}
+
+\noindent\textbf{{关键词：}}绿电直连；电氢氨耦合；合成氨；混合整数规划；储能配置；源荷匹配
+
+\section{{问题重述与建模边界}}
+园区由 40 MW 风电、64 MW 光伏、常规电负荷、ALK 电解槽、PEM 电解槽和合成氨装置组成。初始制氨产能为 36 t/d，扩容后为 72 t/d。题面提供 6 类风电场景和 4 类光伏场景，组合形成 24 个风光场景；每个场景代表 15 天，因此本文按 360 天代表年统计。
+
+本文坚持统一口径：绿电指标完全按题面公式计算；年平均吨氨成本按年总成本除以年总产氨量计算；所有年化固定成本按 360 天代表年摊入；72 t/d 扩容只放大 ALK、PEM 和合成氨装置，常规负荷与既有风光装机不随产能放大。
+
+\section{{指标与成本模型}}
+三项绿电指标定义为
+\[
+r_1=\frac{{E_{{use}}-E_{{sell}}-E_{{buy}}}}{{E_{{re}}}},\quad
+r_2=\frac{{E_{{re}}-E_{{sell}}}}{{E_{{use}}}},\quad
+r_3=\frac{{E_{{sell}}}}{{E_{{re}}}}.
+\]
+安全裕度定义为 $r_1-0.60$、$r_2-0.30$ 和 $0.20-r_3$。综合成本包括购电成本、售电收入抵扣、风光度电成本、制氢/制氨运维、合成氨装置年化成本和储能年化成本。
+
+\section{{问题一：典型日确定性核算}}
+典型日新能源发电量为 {fnum(p1['renewable_mwh'])} MWh，总用电量为 {fnum(p1['total_use_mwh'])} MWh，购电量为 {fnum(p1['buy_mwh'])} MWh，上网电量为 {fnum(p1['sell_mwh'])} MWh。综合吨氨成本为 {fnum(p1['comprehensive_cost_per_ton'])} 元/t。
+
+\begin{{table}}[htbp]\centering
+\caption{{问题一三项指标}}
+\begin{{tabular}}{{lrrl}}\toprule
+指标 & 数值 & 安全裕度 & 判定 \\\midrule
+新能源自发自用比例 & {fnum(p1['self_use_ratio'], 3)} & {fnum(p1['margin_self_use'], 3)} & {pass_cn(float(p1['margin_self_use']))} \\
+总用电量绿电比例 & {fnum(p1['green_ratio'], 3)} & {fnum(p1['margin_green'], 3)} & {pass_cn(float(p1['margin_green']))} \\
+新能源上网比例 & {fnum(p1['export_ratio'], 3)} & {fnum(p1['margin_export'], 3)} & {pass_cn(float(p1['margin_export']))} \\
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+
+\begin{{figure}}[htbp]\centering
+\includegraphics[width=0.92\textwidth]{{fig_problem1_power.png}}
+\caption{{问题一典型日功率曲线}}
+\end{{figure}}
+
+\section{{问题二：离散开停机调度}}
+72 t/d 产能下，合成氨额定产量为 3 t/h，72/63/54/45/36 t/d 分别对应 24/21/18/15/12 个开机小时。开机小时满负荷运行，停机小时功率为 0。
+
+\begin{{table}}[htbp]\centering
+\caption{{问题二典型日结果}}
+\begin{{tabular}}{{rrrr}}\toprule
+日产量 t/d & 实际产量 t & 综合成本 元/t & 达标分类 \\\midrule
+{p2_tex_rows}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+
+典型日最低综合吨氨成本对应日产量 {int(p2best['target_ton'])} t/d，综合成本 {fnum(p2best['comprehensive_cost_per_ton'])} 元/t。
+
+\begin{{figure}}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{{fig_problem2_typical_cost.png}}
+\caption{{问题二典型日不同产量成本}}
+\end{{figure}}
+
+\section{{问题三：连续功率调节}}
+连续调节模型中，设备保持运行，功率处于 10\%-100\% 额定范围内；每个给定日产量分别求解，日产氨量作为等式约束。
+
+\begin{{table}}[htbp]\centering
+\caption{{问题三代表年结果}}
+\begin{{tabular}}{{rrrrrr}}\toprule
+日产量 t/d & 年产量 t & 年均成本 元/t & 全满足天数 & 部分满足天数 & 不满足天数 \\\midrule
+{p3_tex_rows}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+
+代表年最低年平均综合吨氨成本对应日产量 {int(p3best['target_ton'])} t/d，成本 {fnum(p3best['annual_avg_cost_per_ton'])} 元/t。
+
+\begin{{figure}}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{{fig_problem3_annual_cost.png}}
+\caption{{问题三不同产量代表年平均成本}}
+\end{{figure}}
+
+\section{{问题四：离网储能配置}}
+离网模式下无购电、无上网。无储能阶段采用分层目标：先最大化制氨量，再在同等产量下比较综合成本。最大弃电场景来自无储能离网结果，识别为 {latex_escape(scenario)}。
+
+\begin{{table}}[htbp]\centering
+\caption{{最大弃电场景储能前后对比}}
+\begin{{tabular}}{{lrr}}\toprule
+项目 & 无储能 & 有储能 \\\midrule
+日产氨量 t & {fnum(base_row['product_ton'])} & {fnum(stor_row['product_ton'])} \\
+弃电量 MWh & {fnum(base_row['curtail_mwh'])} & {fnum(stor_row['curtail_mwh'])} \\
+常规负荷缺供 MWh & {fnum(base_row['base_unserved_mwh'], 6)} & {fnum(stor_row['base_unserved_mwh'], 6)} \\
+综合吨氨成本 元/t & {fnum(base_row['comprehensive_cost_per_ton'])} & {fnum(stor_row['comprehensive_cost_per_ton'])} \\
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+
+配置储能后，该场景日产氨量提升 {fnum(product_gain)} t，约 {fnum(product_gain_pct, 1)}\%。回算 24 个场景后，储能容量为 {fnum(p4['battery_e_mwh'], 1)} MWh，功率为 {fnum(p4['battery_p_mw'], 1)} MW，代表年产氨量为 {fnum(p4['annual_product_ton'])} t，年平均综合吨氨成本为 {fnum(p4['annual_avg_cost_per_ton'])} 元/t。求解器状态为 {latex_escape(', '.join(solver_values))}。
+
+\begin{{figure}}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{{fig_problem4_storage_compare.png}}
+\caption{{问题四储能前后产量对比}}
+\end{{figure}}
+
+\section{{问题五：政策影响与建议}}
+绿电直连型电氢氨园区可促进新能源就近消纳，将波动性风光电转化为可储运化工产品，并提高工业园区低碳竞争力。潜在风险包括局部潮流波动增强、备用与调峰压力增加、多主体计量结算边界复杂化。建议坚持以荷定源，将电解槽、合成氨和储能作为协同调节资源，推进多用户园区化交易和绿色氢氨产品认证，并对能够降低系统调峰压力的园区建立辅助服务补偿机制。2030 年前 35\% 绿电比例可作为未来趋严情景分析，不替代题面阈值。
+
+\section{{验证与可复现性}}
+本项目所有结果均由 \texttt{{python -X utf8 A\_solution/src/run\_all.py}} 生成。
+\begin{{longtable}}{{lll}}\toprule
+检查项 & 数值 & 是否通过 \\\midrule
+{checks_tex_rows}
+\bottomrule
+\end{{longtable}}
+
+\section{{结论}}
+本文给出了一套口径统一、可复现的 A 题基准解。问题一揭示满负荷运行下的自发自用和上网比例压力；问题二说明离散开停机可以降低成本但调节粒度较粗；问题三表明连续功率调节更适合利用风光富余和分时电价；问题四说明储能应以经济性和目标产量约束共同决定，而不能简单按最大弃电量配置。
+
+\end{{document}}
+"""
+
+    (REPORT_DIR / "formal_paper.md").write_text(formal_md, encoding="utf-8")
+    (REPORT_DIR / "main.tex").write_text(latex, encoding="utf-8")
+
+
 def create_pdf_report(summary: Dict[str, object]) -> Path:
     pdf_path = REPORT_DIR / "A题_电氢氨园区优化运行报告.pdf"
     font_path = Path("C:/Windows/Fonts/msyh.ttc")
@@ -1177,6 +1535,7 @@ def main() -> None:
     }
     create_latex_report(summary)
     create_formal_markdown_report(summary)
+    create_expanded_paper(summary)
     pdf_report = create_pdf_report(summary)
     workbook = build_workbook()
     print("data_dir", inputs.data_dir)

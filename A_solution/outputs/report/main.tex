@@ -1,45 +1,143 @@
 
 \documentclass[12pt]{article}
 \usepackage[UTF8]{ctex}
-\usepackage{geometry,booktabs,longtable,graphicx,amsmath}
+\usepackage{geometry,booktabs,longtable,graphicx,amsmath,array}
 \geometry{a4paper,margin=2.2cm}
 \graphicspath{{../figures/}}
-\title{A题：绿电直连型电氢氨园区优化运行}
+\title{A题：统一口径下的绿电直连型电氢氨园区优化运行}
 \author{Codex 自动建模求解}
 \date{2026年5月}
 \begin{document}
 \maketitle
-\section*{摘要}
-本文围绕绿电直连型电氢氨园区建立统一小时级功率平衡模型。所有问题严格使用题面给出的三项绿电直连指标：
+
+\begin{abstract}
+本文面向绿电直连型电氢氨园区，建立统一的数据读取、绿电指标和吨氨成本核算框架。问题一至四严格采用题面阈值 $r_1>60\%$、$r_2>30\%$、$r_3<20\%$ 判定，政策中 2030 年前提高至 35\% 的要求仅用于问题五讨论。结果表明，满负荷运行存在上网比例偏高和自发自用不足，离散开停机可降低成本但粒度较粗，连续功率调节更利于源荷匹配；离网储能在保持常规负荷优先服务的前提下，可提高风光富余利用和制氨产量。
+\end{abstract}
+
+\noindent\textbf{关键词：}绿电直连；电氢氨耦合；合成氨；混合整数规划；储能配置；源荷匹配
+
+\section{问题重述与建模边界}
+园区由 40 MW 风电、64 MW 光伏、常规电负荷、ALK 电解槽、PEM 电解槽和合成氨装置组成。初始制氨产能为 36 t/d，扩容后为 72 t/d。题面提供 6 类风电场景和 4 类光伏场景，组合形成 24 个风光场景；每个场景代表 15 天，因此本文按 360 天代表年统计。
+
+本文坚持统一口径：绿电指标完全按题面公式计算；年平均吨氨成本按年总成本除以年总产氨量计算；所有年化固定成本按 360 天代表年摊入；72 t/d 扩容只放大 ALK、PEM 和合成氨装置，常规负荷与既有风光装机不随产能放大。
+
+\section{指标与成本模型}
+三项绿电指标定义为
 \[
 r_1=\frac{E_{use}-E_{sell}-E_{buy}}{E_{re}},\quad
 r_2=\frac{E_{re}-E_{sell}}{E_{use}},\quad
 r_3=\frac{E_{sell}}{E_{re}}.
 \]
-达标判定采用严格不等式：$r_1>60\%$、$r_2>30\%$、$r_3<20\%$。
+安全裕度定义为 $r_1-0.60$、$r_2-0.30$ 和 $0.20-r_3$。综合成本包括购电成本、售电收入抵扣、风光度电成本、制氢/制氨运维、合成氨装置年化成本和储能年化成本。
 
-\section{模型口径}
-36 吨/日基础产能下，ALK、PEM 与合成氨装置额定功率分别为 10MW、10MW、0.75MW；扩容到 72 吨/日时三类设备同步线性放大，风电 40MW、光伏 64MW 和常规负荷不随产能放大。ALK、PEM 与合成氨装置按额定功率比例同步调节，避免模型偏向某一类电解槽。全年按 24 个场景各代表 15 天形成 360 天代表年。
+\section{问题一：典型日确定性核算}
+典型日新能源发电量为 603.45 MWh，总用电量为 558.72 MWh，购电量为 172.04 MWh，上网电量为 216.77 MWh。综合吨氨成本为 4368.63 元/t。
 
-\section{问题一结果}
-典型日新能源发电量为 603.45 MWh，总用电量为 558.72 MWh，购电量为 172.04 MWh，上网电量为 216.77 MWh。三项指标分别为 0.282、0.692、0.359，达标分类为 partial。综合吨氨成本为 4368.63 元/吨。
-\begin{figure}[htbp]\centering\includegraphics[width=0.92\textwidth]{fig_problem1_power.png}\caption{问题一典型日功率曲线}\end{figure}
+\begin{table}[htbp]\centering
+\caption{问题一三项指标}
+\begin{tabular}{lrrl}\toprule
+指标 & 数值 & 安全裕度 & 判定 \\\midrule
+新能源自发自用比例 & 0.282 & -0.318 & 不通过 \\
+总用电量绿电比例 & 0.692 & 0.392 & 通过 \\
+新能源上网比例 & 0.359 & -0.159 & 不通过 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\section{问题二结果}
-离散开停机模型中，开机小时按 72 吨/日产能满负荷运行，停机小时功率为 0。典型日最低综合吨氨成本对应日产量为 36 吨，成本为 3284.27 元/吨，达标分类为 partial。
-\begin{figure}[htbp]\centering\includegraphics[width=0.9\textwidth]{fig_problem2_typical_cost.png}\caption{问题二典型日不同产量成本}\end{figure}
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.92\textwidth]{fig_problem1_power.png}
+\caption{问题一典型日功率曲线}
+\end{figure}
 
-\section{问题三结果}
-连续调节模型对每个给定日产量分别求解，日产氨量作为等式约束。24 场景代表年中，最低年平均综合吨氨成本对应日产量为 36 吨，年平均成本为 4304.55 元/吨。
-\begin{figure}[htbp]\centering\includegraphics[width=0.9\textwidth]{fig_problem3_annual_cost.png}\caption{问题三不同产量代表年平均成本}\end{figure}
+\section{问题二：离散开停机调度}
+72 t/d 产能下，合成氨额定产量为 3 t/h，72/63/54/45/36 t/d 分别对应 24/21/18/15/12 个开机小时。开机小时满负荷运行，停机小时功率为 0。
 
-\section{问题四结果}
-离网无储能阶段先最大化制氨量，再比较综合成本。最大弃电场景由无储能离网结果识别，为 风电场景4-光伏场景1。储能配置采用 $E_{bat}=20.0$ MWh、$P_{bat}=5.0$ MW，回放 24 场景后代表年产氨量为 10044.43 吨，年平均综合吨氨成本为 4246.01 元/吨。
-\begin{figure}[htbp]\centering\includegraphics[width=0.9\textwidth]{fig_problem4_storage_compare.png}\caption{问题四储能前后产量对比}\end{figure}
+\begin{table}[htbp]\centering
+\caption{问题二典型日结果}
+\begin{tabular}{rrrr}\toprule
+日产量 t/d & 实际产量 t & 综合成本 元/t & 达标分类 \\\midrule
+72 & 72.00 & 6265.44 & 三项均满足 \\
+63 & 63.00 & 5380.97 & 三项均满足 \\
+54 & 54.00 & 4653.00 & 三项均满足 \\
+45 & 45.00 & 4018.62 & 部分满足 \\
+36 & 36.00 & 3284.27 & 部分满足 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\section{问题五政策分析}
-绿电直连园区高渗透率提高后，一方面有利于新能源就近消纳、降低化工产品碳足迹、形成源荷储协同示范；另一方面也可能加剧局部电网潮流波动、调峰备用需求和结算边界复杂度。建议围绕以荷定源、储能与柔性负荷协同、多用户园区化交易、绿氨产品认证和辅助服务补偿机制完善政策体系。
+典型日最低综合吨氨成本对应日产量 36 t/d，综合成本 3284.27 元/t。
+
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{fig_problem2_typical_cost.png}
+\caption{问题二典型日不同产量成本}
+\end{figure}
+
+\section{问题三：连续功率调节}
+连续调节模型中，设备保持运行，功率处于 10\%-100\% 额定范围内；每个给定日产量分别求解，日产氨量作为等式约束。
+
+\begin{table}[htbp]\centering
+\caption{问题三代表年结果}
+\begin{tabular}{rrrrrr}\toprule
+日产量 t/d & 年产量 t & 年均成本 元/t & 全满足天数 & 部分满足天数 & 不满足天数 \\\midrule
+36 & 12960.00 & 4304.55 & 165 & 195 & 0 \\
+45 & 16200.00 & 5084.19 & 240 & 120 & 0 \\
+54 & 19440.00 & 5726.32 & 240 & 120 & 0 \\
+63 & 22680.00 & 6466.04 & 300 & 60 & 0 \\
+72 & 25920.00 & 7228.97 & 270 & 90 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+代表年最低年平均综合吨氨成本对应日产量 36 t/d，成本 4304.55 元/t。
+
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{fig_problem3_annual_cost.png}
+\caption{问题三不同产量代表年平均成本}
+\end{figure}
+
+\section{问题四：离网储能配置}
+离网模式下无购电、无上网。无储能阶段采用分层目标：先最大化制氨量，再在同等产量下比较综合成本。最大弃电场景来自无储能离网结果，识别为 风电场景4-光伏场景1。
+
+\begin{table}[htbp]\centering
+\caption{最大弃电场景储能前后对比}
+\begin{tabular}{lrr}\toprule
+项目 & 无储能 & 有储能 \\\midrule
+日产氨量 t & 46.19 & 47.69 \\
+弃电量 MWh & 177.29 & 151.16 \\
+常规负荷缺供 MWh & 0.000000 & 0.000000 \\
+综合吨氨成本 元/t & 4256.93 & 4252.93 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+配置储能后，该场景日产氨量提升 1.50 t，约 3.3\%。回算 24 个场景后，储能容量为 20.0 MWh，功率为 5.0 MW，代表年产氨量为 10044.43 t，年平均综合吨氨成本为 4246.01 元/t。求解器状态为 discrete\_storage\_fallback。
+
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.9\textwidth]{fig_problem4_storage_compare.png}
+\caption{问题四储能前后产量对比}
+\end{figure}
+
+\section{问题五：政策影响与建议}
+绿电直连型电氢氨园区可促进新能源就近消纳，将波动性风光电转化为可储运化工产品，并提高工业园区低碳竞争力。潜在风险包括局部潮流波动增强、备用与调峰压力增加、多主体计量结算边界复杂化。建议坚持以荷定源，将电解槽、合成氨和储能作为协同调节资源，推进多用户园区化交易和绿色氢氨产品认证，并对能够降低系统调峰压力的园区建立辅助服务补偿机制。2030 年前 35\% 绿电比例可作为未来趋严情景分析，不替代题面阈值。
+
+\section{验证与可复现性}
+本项目所有结果均由 \texttt{python -X utf8 A\_solution/src/run\_all.py} 生成。
+\begin{longtable}{lll}\toprule
+检查项 & 数值 & 是否通过 \\\midrule
+xlsx\_count & 8 & True \\
+hours & 24 & True \\
+scenario\_count & 24 & True \\
+problem2\_targets & 72,63,54,45,36 & True \\
+problem3\_lp\_status & analytic\_optimal & True \\
+scipy\_available & False & True \\
+pulp\_available & False & True \\
+strict\_milp\_solver\_available & False & True \\
+problem4\_solver\_status & discrete\_storage\_fallback & True \\
+problem4\_storage\_e\_nonnegative & 20.0 & True \\
+\bottomrule
+\end{longtable}
 
 \section{结论}
-本求解采用统一数据、指标与成本函数，避免题面指标和政策指标混用。结果显示，离散和连续调节的核心差异来自生产小时可选性和功率柔性，储能在离网模式下主要通过吸收弃电提升产量，但其经济性依赖容量成本与目标产量约束。
+本文给出了一套口径统一、可复现的 A 题基准解。问题一揭示满负荷运行下的自发自用和上网比例压力；问题二说明离散开停机可以降低成本但调节粒度较粗；问题三表明连续功率调节更适合利用风光富余和分时电价；问题四说明储能应以经济性和目标产量约束共同决定，而不能简单按最大弃电量配置。
+
 \end{document}
