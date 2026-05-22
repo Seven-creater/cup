@@ -494,7 +494,7 @@ def solve_offgrid_storage_milp(
     e_per_ton = energy_per_ton_mwh()
     pmax = battery_e_mwh / BAT_DURATION_HOURS if battery_e_mwh > 0 else 0.0
     renewable = wind + pv
-    m = pulp.LpProblem("offgrid_storage_dispatch", pulp.LpMaximize)
+    m = pulp.LpProblem("offgrid_storage_dispatch", pulp.LpMinimize)
     q = pulp.LpVariable.dicts("q", range(24), lowBound=0, upBound=q_max)
     u = pulp.LpVariable.dicts("u", range(24), cat="Binary")
     charge = pulp.LpVariable.dicts("charge", range(24), lowBound=0, upBound=pmax)
@@ -513,18 +513,28 @@ def solve_offgrid_storage_milp(
         m += soc[h + 1] == soc[h] * (1.0 - BAT_SELF_LOSS) + BAT_ETA_CH * charge[h] - discharge[h] / BAT_ETA_DIS
         m += renewable[h] + discharge[h] + base_unserved[h] == inputs.base_load_mw[h] + e_per_ton * q[h] + charge[h] + curtail[h]
     m += soc[24] == soc[0]
+
+    # Stage 1: meet the conventional load as much as physically possible.
+    # This prevents the model from shedding base load to create ammonia production.
+    total_unserved = pulp.lpSum(base_unserved[h] for h in range(24))
+    m += total_unserved
+    status = m.solve(pulp.PULP_CBC_CMD(msg=False))
+    if pulp.LpStatus[status] != "Optimal":
+        raise RuntimeError(f"PuLP MILP stage1 status: {pulp.LpStatus[status]}")
+    min_unserved = float(pulp.value(total_unserved) or 0.0)
+
+    # Stage 2: with base-load service fixed, maximize ammonia production and reduce curtailment.
+    m += total_unserved <= min_unserved + 1e-6
     if target_product_ton is not None:
         m += pulp.lpSum(q[h] for h in range(24)) >= target_product_ton
-
-    # Lexicographic goal approximation: production first, then curtailment and unserved load.
-    m += (
+    m.sense = pulp.LpMaximize
+    m.setObjective(
         1_000_000.0 * pulp.lpSum(q[h] for h in range(24))
-        - 10_000.0 * pulp.lpSum(base_unserved[h] for h in range(24))
         - pulp.lpSum(curtail[h] for h in range(24))
     )
     status = m.solve(pulp.PULP_CBC_CMD(msg=False))
     if pulp.LpStatus[status] != "Optimal":
-        raise RuntimeError(f"PuLP MILP status: {pulp.LpStatus[status]}")
+        raise RuntimeError(f"PuLP MILP stage2 status: {pulp.LpStatus[status]}")
 
     q_arr = np.array([pulp.value(q[h]) or 0.0 for h in range(24)])
     charge_arr = np.array([pulp.value(charge[h]) or 0.0 for h in range(24)])
@@ -532,7 +542,7 @@ def solve_offgrid_storage_milp(
     soc_arr = np.array([pulp.value(soc[h]) or 0.0 for h in range(25)])
     curtail_arr = np.array([pulp.value(curtail[h]) or 0.0 for h in range(24)])
     unserved_arr = np.array([pulp.value(base_unserved[h]) or 0.0 for h in range(24)])
-    total_use = np.minimum(inputs.base_load_mw, renewable + discharge_arr) + q_arr * e_per_ton
+    total_use = np.maximum(inputs.base_load_mw - unserved_arr, 0.0) + q_arr * e_per_ton
     metrics = calc_green_metrics(total_use, renewable, np.zeros(24), np.zeros(24))
     costs = calc_costs(inputs, wind, pv, np.zeros(24), np.zeros(24), q_arr, capacity, battery_e_mwh)
     return {
@@ -561,6 +571,7 @@ def solve_storage_dispatch(inputs: Inputs, wind: np.ndarray, pv: np.ndarray, bat
 def optimize_battery_for_scenario(inputs: Inputs, wind: np.ndarray, pv: np.ndarray, baseline: Dict[str, object]) -> Dict[str, object]:
     base_product = baseline["costs"]["product_ton"]
     base_curtail = float(np.sum(baseline["curtail_mwh"]))
+    base_unserved = float(np.sum(baseline["base_unserved_mwh"]))
     target_improvement = min(72.0 - base_product, max(1.0, 0.10 * base_curtail / energy_per_ton_mwh()))
     target_product = min(72.0, base_product + target_improvement)
     max_e = max(20.0, min(240.0, base_curtail * 1.2))
@@ -568,9 +579,10 @@ def optimize_battery_for_scenario(inputs: Inputs, wind: np.ndarray, pv: np.ndarr
     best = None
     feasible = []
     for e in candidates:
-        res = solve_storage_dispatch(inputs, wind, pv, float(e), target_product)
+        res = solve_storage_dispatch(inputs, wind, pv, float(e), None)
         product = res["costs"]["product_ton"]
-        if product + 1e-6 >= target_product:
+        unserved = float(np.sum(res["base_unserved_mwh"]))
+        if product + 1e-6 >= target_product and unserved <= base_unserved + 1e-6:
             feasible.append(res)
     pool = feasible if feasible else [solve_storage_dispatch(inputs, wind, pv, float(e), None) for e in candidates]
     for res in pool:
