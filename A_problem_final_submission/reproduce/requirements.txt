@@ -1,0 +1,9 @@
+numpy
+pandas
+openpyxl
+Pillow
+reportlab
+pypdf
+pulp
+scipy
+highspy
