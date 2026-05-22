@@ -33,6 +33,13 @@ try:
 except Exception:
     SCIPY_AVAILABLE = False
 
+try:
+    import pulp  # type: ignore
+
+    PULP_AVAILABLE = True
+except Exception:
+    PULP_AVAILABLE = False
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "outputs"
@@ -471,6 +478,86 @@ def simulate_battery_dispatch(inputs: Inputs, wind: np.ndarray, pv: np.ndarray, 
     }
 
 
+def solve_offgrid_storage_milp(
+    inputs: Inputs,
+    wind: np.ndarray,
+    pv: np.ndarray,
+    battery_e_mwh: float,
+    target_product_ton: float | None = None,
+) -> Dict[str, object]:
+    if not PULP_AVAILABLE:
+        raise RuntimeError("PuLP is not available.")
+
+    capacity = 72.0
+    q_min = 0.10 * max_rate_tph(capacity)
+    q_max = max_rate_tph(capacity)
+    e_per_ton = energy_per_ton_mwh()
+    pmax = battery_e_mwh / BAT_DURATION_HOURS if battery_e_mwh > 0 else 0.0
+    renewable = wind + pv
+    m = pulp.LpProblem("offgrid_storage_dispatch", pulp.LpMaximize)
+    q = pulp.LpVariable.dicts("q", range(24), lowBound=0, upBound=q_max)
+    u = pulp.LpVariable.dicts("u", range(24), cat="Binary")
+    charge = pulp.LpVariable.dicts("charge", range(24), lowBound=0, upBound=pmax)
+    discharge = pulp.LpVariable.dicts("discharge", range(24), lowBound=0, upBound=pmax)
+    soc = pulp.LpVariable.dicts("soc", range(25), lowBound=0, upBound=battery_e_mwh)
+    curtail = pulp.LpVariable.dicts("curtail", range(24), lowBound=0)
+    base_unserved = pulp.LpVariable.dicts("base_unserved", range(24), lowBound=0)
+    is_charging = pulp.LpVariable.dicts("is_charging", range(24), cat="Binary")
+
+    m += soc[0] == 0
+    for h in range(24):
+        m += q[h] <= q_max * u[h]
+        m += q[h] >= q_min * u[h]
+        m += charge[h] <= pmax * is_charging[h]
+        m += discharge[h] <= pmax * (1 - is_charging[h])
+        m += soc[h + 1] == soc[h] * (1.0 - BAT_SELF_LOSS) + BAT_ETA_CH * charge[h] - discharge[h] / BAT_ETA_DIS
+        m += renewable[h] + discharge[h] + base_unserved[h] == inputs.base_load_mw[h] + e_per_ton * q[h] + charge[h] + curtail[h]
+    m += soc[24] == soc[0]
+    if target_product_ton is not None:
+        m += pulp.lpSum(q[h] for h in range(24)) >= target_product_ton
+
+    # Lexicographic goal approximation: production first, then curtailment and unserved load.
+    m += (
+        1_000_000.0 * pulp.lpSum(q[h] for h in range(24))
+        - 10_000.0 * pulp.lpSum(base_unserved[h] for h in range(24))
+        - pulp.lpSum(curtail[h] for h in range(24))
+    )
+    status = m.solve(pulp.PULP_CBC_CMD(msg=False))
+    if pulp.LpStatus[status] != "Optimal":
+        raise RuntimeError(f"PuLP MILP status: {pulp.LpStatus[status]}")
+
+    q_arr = np.array([pulp.value(q[h]) or 0.0 for h in range(24)])
+    charge_arr = np.array([pulp.value(charge[h]) or 0.0 for h in range(24)])
+    discharge_arr = np.array([pulp.value(discharge[h]) or 0.0 for h in range(24)])
+    soc_arr = np.array([pulp.value(soc[h]) or 0.0 for h in range(25)])
+    curtail_arr = np.array([pulp.value(curtail[h]) or 0.0 for h in range(24)])
+    unserved_arr = np.array([pulp.value(base_unserved[h]) or 0.0 for h in range(24)])
+    total_use = np.minimum(inputs.base_load_mw, renewable + discharge_arr) + q_arr * e_per_ton
+    metrics = calc_green_metrics(total_use, renewable, np.zeros(24), np.zeros(24))
+    costs = calc_costs(inputs, wind, pv, np.zeros(24), np.zeros(24), q_arr, capacity, battery_e_mwh)
+    return {
+        "q_tph": q_arr,
+        "charge_mw": charge_arr,
+        "discharge_mw": discharge_arr,
+        "soc_mwh": soc_arr,
+        "curtail_mwh": curtail_arr,
+        "base_unserved_mwh": unserved_arr,
+        "metrics": metrics,
+        "costs": costs,
+        "battery_e_mwh": battery_e_mwh,
+        "battery_p_mw": pmax,
+        "solver_status": "pulp_milp_optimal",
+    }
+
+
+def solve_storage_dispatch(inputs: Inputs, wind: np.ndarray, pv: np.ndarray, battery_e_mwh: float, target_product_ton: float | None = None) -> Dict[str, object]:
+    if PULP_AVAILABLE:
+        return solve_offgrid_storage_milp(inputs, wind, pv, battery_e_mwh, target_product_ton)
+    res = simulate_battery_dispatch(inputs, wind, pv, battery_e_mwh)
+    res["solver_status"] = "discrete_storage_fallback"
+    return res
+
+
 def optimize_battery_for_scenario(inputs: Inputs, wind: np.ndarray, pv: np.ndarray, baseline: Dict[str, object]) -> Dict[str, object]:
     base_product = baseline["costs"]["product_ton"]
     base_curtail = float(np.sum(baseline["curtail_mwh"]))
@@ -481,11 +568,11 @@ def optimize_battery_for_scenario(inputs: Inputs, wind: np.ndarray, pv: np.ndarr
     best = None
     feasible = []
     for e in candidates:
-        res = simulate_battery_dispatch(inputs, wind, pv, float(e))
+        res = solve_storage_dispatch(inputs, wind, pv, float(e), target_product)
         product = res["costs"]["product_ton"]
         if product + 1e-6 >= target_product:
             feasible.append(res)
-    pool = feasible if feasible else [simulate_battery_dispatch(inputs, wind, pv, float(e)) for e in candidates]
+    pool = feasible if feasible else [solve_storage_dispatch(inputs, wind, pv, float(e), None) for e in candidates]
     for res in pool:
         key = (res["costs"]["comprehensive_cost_per_ton"], -res["costs"]["product_ton"], res["battery_e_mwh"])
         if best is None or key < best[0]:
@@ -752,9 +839,9 @@ def create_formal_markdown_report(summary: Dict[str, object]) -> Path:
     p3best = summary["problem3_best"]
     p4 = summary["problem4"]
     solver_note = (
-        "服务器/本地环境检测到 scipy，可进一步替换问题四为严格 MILP。"
-        if SCIPY_AVAILABLE
-        else "当前环境未检测到 scipy/pulp/highspy，问题四采用可复现离散储能调度近似；结果表中保留该求解器状态，后续可在安装 MILP 求解器后替换。"
+        "当前环境检测到 PuLP，问题四储能调度采用严格 MILP：包含设备运行二进制变量、充放电互斥、SOC 首尾一致、运行下限和目标产量约束。"
+        if PULP_AVAILABLE
+        else "当前环境未检测到 PuLP，问题四采用可复现离散储能调度近似；结果表中保留该求解器状态，后续可在安装 MILP 求解器后替换。"
     )
     text = f"""# A题：绿电直连型电氢氨园区优化运行
 
@@ -1012,10 +1099,11 @@ def main() -> None:
     p4_compare_no = []
     p4_compare_bat = []
     for scen, wind, pv in scenarios:
-        res = simulate_battery_dispatch(inputs, wind, pv, e_bat)
+        res = solve_storage_dispatch(inputs, wind, pv, e_bat, None)
         row = row_from_result("P4_storage", scen, "max", res)
         row["battery_e_mwh"] = res["battery_e_mwh"]
         row["battery_p_mw"] = res["battery_p_mw"]
+        row["solver_status"] = res.get("solver_status", "unknown")
         row["curtail_mwh"] = float(np.sum(res["curtail_mwh"]))
         row["base_unserved_mwh"] = float(np.sum(res["base_unserved_mwh"]))
         p4_storage_rows.append(row)
@@ -1058,8 +1146,10 @@ def main() -> None:
     validation_rows.append({"check": "scenario_count", "value": len(scenarios), "pass": len(scenarios) == 24})
     validation_rows.append({"check": "problem2_targets", "value": ",".join(map(str, targets)), "pass": True})
     validation_rows.append({"check": "problem3_lp_status", "value": "analytic_optimal", "pass": True})
-    validation_rows.append({"check": "strict_milp_solver_available", "value": SCIPY_AVAILABLE, "pass": True})
-    validation_rows.append({"check": "problem4_solver_status", "value": "discrete_storage_fallback" if not SCIPY_AVAILABLE else "scipy_available_for_upgrade", "pass": True})
+    validation_rows.append({"check": "scipy_available", "value": SCIPY_AVAILABLE, "pass": True})
+    validation_rows.append({"check": "pulp_available", "value": PULP_AVAILABLE, "pass": True})
+    validation_rows.append({"check": "strict_milp_solver_available", "value": PULP_AVAILABLE, "pass": True})
+    validation_rows.append({"check": "problem4_solver_status", "value": "pulp_milp" if PULP_AVAILABLE else "discrete_storage_fallback", "pass": True})
     validation_rows.append({"check": "problem4_storage_e_nonnegative", "value": e_bat, "pass": e_bat >= -EPS})
     write_csv(TABLE_DIR / "validation_checks.csv", validation_rows)
 
