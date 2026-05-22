@@ -4,8 +4,8 @@ hours,24,True
 scenario_count,24,True
 problem2_targets,"72,63,54,45,36",True
 problem3_lp_status,analytic_optimal,True
-scipy_available,False,True
-pulp_available,False,True
-strict_milp_solver_available,False,True
-problem4_solver_status,discrete_storage_fallback,True
+scipy_available,True,True
+pulp_available,True,True
+strict_milp_solver_available,True,True
+problem4_solver_status,pulp_milp,True
 problem4_storage_e_nonnegative,20.0,True

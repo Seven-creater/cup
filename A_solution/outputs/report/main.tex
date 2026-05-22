@@ -102,15 +102,15 @@ r_3=\frac{E_{sell}}{E_{re}}.
 \caption{最大弃电场景储能前后对比}
 \begin{tabular}{lrr}\toprule
 项目 & 无储能 & 有储能 \\\midrule
-日产氨量 t & 46.19 & 47.69 \\
-弃电量 MWh & 177.29 & 151.16 \\
-常规负荷缺供 MWh & 0.000000 & 0.000000 \\
-综合吨氨成本 元/t & 4256.93 & 4252.93 \\
+日产氨量 t & 46.19 & 47.74 \\
+弃电量 MWh & 177.29 & 148.82 \\
+常规负荷缺供 MWh & 0.000000 & 0.000001 \\
+综合吨氨成本 元/t & 4256.93 & 4250.24 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-配置储能后，该场景日产氨量提升 1.50 t，约 3.3\%。回算 24 个场景后，储能容量为 20.0 MWh，功率为 5.0 MW，代表年产氨量为 10044.43 t，年平均综合吨氨成本为 4246.01 元/t。求解器状态为 discrete\_storage\_fallback。
+配置储能后，该场景日产氨量提升 1.55 t，约 3.4\%。回算 24 个场景后，储能容量为 20.0 MWh，功率为 5.0 MW，代表年产氨量为 10064.49 t，年平均综合吨氨成本为 4240.87 元/t。求解器状态为 pulp\_milp\_optimal。
 
 \begin{figure}[htbp]\centering
 \includegraphics[width=0.9\textwidth]{fig_problem4_storage_compare.png}
@@ -129,10 +129,10 @@ hours & 24 & True \\
 scenario\_count & 24 & True \\
 problem2\_targets & 72,63,54,45,36 & True \\
 problem3\_lp\_status & analytic\_optimal & True \\
-scipy\_available & False & True \\
-pulp\_available & False & True \\
-strict\_milp\_solver\_available & False & True \\
-problem4\_solver\_status & discrete\_storage\_fallback & True \\
+scipy\_available & True & True \\
+pulp\_available & True & True \\
+strict\_milp\_solver\_available & True & True \\
+problem4\_solver\_status & pulp\_milp & True \\
 problem4\_storage\_e\_nonnegative & 20.0 & True \\
 \bottomrule
 \end{longtable}
